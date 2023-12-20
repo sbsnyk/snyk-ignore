@@ -396,7 +396,6 @@ def fetch_last_ticket_comment(ticket_key):
   return None
 
 def check_host(host):
-  print(f'"{host}"')
   if not re.match(r'^[a-zA-Z0-9-_]+(\.[a-zA-Z0-9-_]+)*$', host):
     error(f'Invalid host name "{host}". Example of a correct host name: "my.company.host".')
   return host  
