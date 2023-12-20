@@ -18,6 +18,13 @@ Currently, customers can [ignore](https://docs.snyk.io/scan-using-snyk/find-and-
 * The project must have a [JIRA workflow](https://www.atlassian.com/software/jira/guides/workflows/overview#what-is-a-jira-workflow) with the following states (Other workflows are possible, but they will require minor changes in the tool):
 <img src="./workflow.png" width="300">
 
+## Environment Variables
+
+The tool expects the following environment variables:
+* `SNYK_TOKEN` (the Snyk API token)
+* `JIRA_USER` (the JIRA user account name, usually an email)
+* `JIRA_TOKEN` (the JIRA API token)
+
 ## Usage
 
 ```shell
@@ -41,3 +48,13 @@ options:
                         The host of the Snyk tenant, e.g.: "snyk.io" or
                         "eu.snyk.io" or "au.snyk.io".
 ```
+
+## Examples
+
+* Synchronize the tickets in the JIRA project with project key `IGNORE` located in the JIRA instance at `initech.atlassian.net` with the Snyk EU tenant. Also generate a report at `report.html`:
+```shell
+./snyk-ignore sync --jira-project IGNORE --report report.html --jira-host 'initech.atlassian.net' --snyk-host 'eu.snyk.io' 
+```
+
+## Report
+![example report](./example-report.png)
