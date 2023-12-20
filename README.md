@@ -16,5 +16,4 @@ Currently, customers can [ignore](https://docs.snyk.io/scan-using-snyk/find-and-
 * A JIRA user name (usually an email!) and API token
 * A JIRA project set up to work with [Snyk's JIRA integration](https://docs.snyk.io/integrate-with-snyk/notification-and-ticketing-systems-integrations/jira-integration).
 * The project needs to have a [workflow](https://www.atlassian.com/software/jira/guides/workflows/overview#what-is-a-jira-workflow) with the following states:
-![recommended workflow](workflow.png | width=100)
-<img src="./workflow.png" width="48">
+<img src="./workflow.png" width="100">
