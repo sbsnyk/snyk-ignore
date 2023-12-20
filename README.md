@@ -17,3 +17,27 @@ Currently, customers can [ignore](https://docs.snyk.io/scan-using-snyk/find-and-
 * A JIRA project set up to work with [Snyk's JIRA integration](https://docs.snyk.io/integrate-with-snyk/notification-and-ticketing-systems-integrations/jira-integration).
 * The project must have a [JIRA workflow](https://www.atlassian.com/software/jira/guides/workflows/overview#what-is-a-jira-workflow) with the following states (Other workflows are possible, but they will require minor changes in the tool):
 <img src="./workflow.png" width="300">
+
+## Usage
+
+```shell
+$ ./snyk-ignore sync -h
+usage: snyk-ignore sync [-h] -p JIRA_PROJECT [-o REPORT] -j JIRA_HOST
+                        [-s {snyk.io,eu.snyk.io,au.snyk.io}]
+
+Synchronize JIRA tickets and their linked Snyk issues
+
+options:
+  -h, --help            show this help message and exit
+  -p JIRA_PROJECT, --jira-project JIRA_PROJECT
+                        The project key of the JIRA project to synchronize,
+                        e.g. "ISSUES"
+  -o REPORT, --report REPORT
+                        The path to were the HTML report ought to be saved
+  -j JIRA_HOST, --jira-host JIRA_HOST
+                        The host of the JIRA instance, e.g.:
+                        "mycompany.atlassian.net"
+  -s {snyk.io,eu.snyk.io,au.snyk.io}, --snyk-host {snyk.io,eu.snyk.io,au.snyk.io}
+                        The host of the Snyk tenant, e.g.: "snyk.io" or
+                        "eu.snyk.io" or "au.snyk.io".
+```
