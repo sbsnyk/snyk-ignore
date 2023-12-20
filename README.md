@@ -12,7 +12,7 @@ Currently, customers can [ignore](https://docs.snyk.io/scan-using-snyk/find-and-
 ## Requirements
 
 * Python 3.11 (An older version will likely work as well, but the script was tested with this version)
-* A [Snyk API token](https://docs.snyk.io/getting-started/how-to-obtain-and-authenticate-with-your-snyk-api-token) with the necessary permissions to list issues and apply ignores.
+* A [Snyk API token](https://docs.snyk.io/getting-started/how-to-obtain-and-authenticate-with-your-snyk-api-token) with the necessary permissions to list issues and apply ignores. It should also be a member of all the Snyk organizations for which issues will be ignored.
 * A JIRA user name (usually an email!) and API token
 * A JIRA project set up to work with [Snyk's JIRA integration](https://docs.snyk.io/integrate-with-snyk/notification-and-ticketing-systems-integrations/jira-integration).
 * The project must have a [JIRA workflow](https://www.atlassian.com/software/jira/guides/workflows/overview#what-is-a-jira-workflow) with the following states (Other workflows are possible, but they will require minor changes in the tool):
