@@ -15,5 +15,4 @@ Currently, customers can [ignore](https://docs.snyk.io/scan-using-snyk/find-and-
 * A [Snyk API token](https://docs.snyk.io/getting-started/how-to-obtain-and-authenticate-with-your-snyk-api-token) with the necessary permissions to list issues and apply ignores.
 * A JIRA user name (usually an email!) and API token
 * A JIRA project set up to work with [Snyk's JIRA integration](https://docs.snyk.io/integrate-with-snyk/notification-and-ticketing-systems-integrations/jira-integration).
-* The project needs to have a [workflow](https://www.atlassian.com/software/jira/guides/workflows/overview#what-is-a-jira-workflow) with the following states:
-<img src="./workflow.png" width="300">
+* The project must have a [JIRA workflow](https://www.atlassian.com/software/jira/guides/workflows/overview#what-is-a-jira-workflow) with the following states: <img src="./workflow.png" width="300"> Other workflows are possible, but they will require minor changes in the tool.
