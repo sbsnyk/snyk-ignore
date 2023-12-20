@@ -57,8 +57,10 @@ options:
 ```
 
 ## Screenshots
+### Report
 ![example report](./example-report.png)
 
+### Output
 ```INFO: Processing ticket IGNORE-18...
 $ ./snyk-ignore sync --jira-project IGNORE --report report.html --jira-host 'initech.atlassian.net' --snyk-host 'eu.snyk.io
 INFO: Processing ticket IGNORE-17...
