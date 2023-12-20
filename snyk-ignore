@@ -17,17 +17,13 @@ import re
 from functools import cache
 import html
 from html.parser import HTMLParser
-
-JIRA_SERVER = 'https://initech-sbs.atlassian.net'
-JIRA_API = JIRA_SERVER + '/rest/api/3'
-SNYK_API = 'https://api.eu.snyk.io'
+import argparse
 
 # JIRA ticket states
 ACCEPTED = 'Accepted'
 REJECTED = 'Rejected'
 FIXED = 'Fixed'
 TODO = 'To Do'
-
 
 class Html2Text(HTMLParser):
   def __init__(self):
@@ -355,7 +351,7 @@ def delete_ignore(org_id, proj_id, issue_id):
   )
 
 def make_ticket_link(ticket_key):
-  return f'{JIRA_SERVER}/browse/{ticket_key}'
+  return f'{JIRA_URL}/browse/{ticket_key}'
 
 def parse_ticket_key(ticket_key):
   m = re.match('(.+)-(\d+)', ticket_key)
@@ -399,7 +395,27 @@ def fetch_last_ticket_comment(ticket_key):
 
   return None
 
-def sync(jira_proj_key, report=False):
+def check_host(host):
+  print(f'"{host}"')
+  if not re.match(r'^[a-zA-Z0-9-_]+(\.[a-zA-Z0-9-_]+)*$', host):
+    error(f'Invalid host name "{host}". Example of a correct host name: "my.company.host".')
+  return host  
+
+def sync(args):
+  jira_host = check_host(args.jira_host)
+  snyk_host = check_host(args.snyk_host)
+  jira_proj_key = args.jira_project
+  report_path = args.report
+
+  global JIRA_URL
+  JIRA_URL = f'https://{jira_host}'
+
+  global JIRA_API
+  JIRA_API = f'{JIRA_URL}/rest/api/3'
+
+  global SNYK_API
+  SNYK_API = f'https://api.{snyk_host}'
+
   finished_items = []
   work_items = []
 
@@ -463,7 +479,7 @@ def sync(jira_proj_key, report=False):
         issue_ignored = True
 
     # reporting
-    if report:
+    if report_path:
       attrs = issue['attributes']
       issue_title = attrs['title']
       issue_type = attrs['type']
@@ -494,7 +510,8 @@ def sync(jira_proj_key, report=False):
             int(issue_score),
           ))
   
-  generate_report(work_items, finished_items)
+  if report_path:
+    generate_report(report_path, work_items, finished_items)
 
 def report_template(work, finished):
   return f'''
@@ -561,7 +578,7 @@ def make_col(content):
 def make_link(target, text):
   return f'<a href="{target}">{text}</a>'
 
-def generate_report(work_items, finished_items):
+def generate_report(report_path, work_items, finished_items):
   work = ''
   finished = ''
 
@@ -596,8 +613,54 @@ def generate_report(work_items, finished_items):
     '''
     finished += row 
 
-  with open('./report.html', 'w') as f:
+  with open(report_path, 'w') as f:
     f.write(report_template(work, finished))
 
 if __name__ == '__main__':
-  sync('IGNORE', report=True)
+  parser = argparse.ArgumentParser(
+    add_help=True,
+    prog='snyk-ignore',
+    description='This tool implements a more structured ignore review process using JIRA',
+  )
+
+  subparsers = parser.add_subparsers()
+
+  sync_parser = subparsers.add_parser(
+    'sync',
+    help='Synchronize JIRA tickets and their linked Snyk issues',
+    description='Synchronize JIRA tickets and their linked Snyk issues',
+  )
+
+  sync_parser.add_argument(
+    '-p', '--jira-project',
+    required=True,
+    help='The project key of the JIRA project to synchronize, e.g. "ISSUES"',
+  )
+
+  sync_parser.add_argument(
+    '-o', '--report',
+    required=False,
+    help='The path to were the HTML report ought to be saved',
+  )
+
+  sync_parser.add_argument(
+    '-j', '--jira-host',
+    required=True,
+    help='The host of the JIRA instance, e.g.: "mycompany.atlassian.net"',
+  )
+
+  sync_parser.add_argument(
+    '-s', '--snyk-host',
+    default='snyk.io',
+    choices=['snyk.io', 'eu.snyk.io', 'au.snyk.io'],
+    help='The host of the Snyk tenant, e.g.: "snyk.io" or "eu.snyk.io" or "au.snyk.io".',
+  )
+
+  sync_parser.set_defaults(func=sync)
+
+  def print_usage(args):
+    print(parser.format_usage())
+
+  parser.set_defaults(func=print_usage)
+  args = parser.parse_args()
+  args.func(args)
