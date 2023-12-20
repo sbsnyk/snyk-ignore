@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+from urllib.parse import quote, unquote
+from urllib.request import (
+  Request,
+  HTTPRedirectHandler,
+  HTTPDefaultErrorHandler,
+  OpenerDirector,
+  HTTPSHandler,
+  HTTPErrorProcessor,
+  UnknownHandler,
+)
+import sys
+import json
+from base64 import b64encode
+from os import environ
+import re
+from functools import cache
+import html
+from html.parser import HTMLParser
+
+JIRA_SERVER = 'https://initech-sbs.atlassian.net'
+JIRA_API = JIRA_SERVER + '/rest/api/3'
+SNYK_API = 'https://api.eu.snyk.io'
+
+# JIRA ticket states
+ACCEPTED = 'Accepted'
+REJECTED = 'Rejected'
+FIXED = 'Fixed'
+TODO = 'To Do'
+
+
+class Html2Text(HTMLParser):
+  def __init__(self):
+    super().__init__()
+    self.text = ''
+
+  def handle_starttag(self, tag, attrs):
+    if tag == 'br':
+      self.text += '\n'
+    elif tag == 'a':
+      attrs = { a[0]:a[1] for a in attrs }
+      self.text += f' {attrs.get("href", "")} '
+
+  def handle_data(self, data):
+    self.text += data
+
+def html2txt(html):
+  parser = Html2Text()
+  parser.feed(html)
+  return parser.text
+
+class ErrorHandler(HTTPDefaultErrorHandler):
+  #def http_error_422(self, req, fp, code, msg, hdrs):
+  def http_error_default(self, req, fp, code, msg, hdrs):
+    exit(fp.read().decode('utf-8'))
+
+def request(
+  url: str,
+  method: str = "GET",
+  headers: dict = {},
+  data: bytes = None,
+):
+  method = method.upper()
+  opener = OpenerDirector()
+  add = opener.add_handler
+  add(HTTPRedirectHandler())
+  add(HTTPSHandler())
+  add(ErrorHandler())
+  add(HTTPErrorProcessor())
+  add(UnknownHandler())
+
+  req = Request(
+    url,
+    data=data,
+    headers=headers,
+    method=method,
+  )
+
+  return opener.open(req)
+
+def text_request(
+  url: str,
+  method: str = "GET",
+  headers: dict = {},
+  data: bytes = None,
+):
+  with request(url=url, method=method, headers=headers, data=data) as resp:
+    return (
+      resp.status,
+      resp.headers,
+      resp.read().decode(resp.headers.get_content_charset('utf-8')),
+    )
+
+def error(msg):
+  sys.exit(f'ERROR: {msg}')
+
+def info(msg):
+  print(f'INFO: {msg}', flush=True)
+
+def warn(msg):
+  print(f'WARN: {msg}', flush=True)
+
+def get_envvar(varname):
+  if not environ.get(varname):
+    error(f'Please set the "{varname}" environment variable!')
+  return environ[varname]
+
+def json_payload(data):
+  return json.dumps(data).encode('utf-8')
+
+def ct_json():
+  return { 'Content-Type': 'application/json' }
+
+def accept_json():
+  return { 'Accept': 'application/json' }
+
+def jira_authorization(user, token):
+  encoded = b64encode(f'{user}:{token}'.encode('utf-8')).decode('utf-8')
+  return { 'Authorization': f'Basic {encoded}' }
+
+def snyk_authorization(token):
+  return { 'Authorization': f'token {token}' }
+
+def default_snyk_headers():
+  return {
+    **accept_json(),
+    **ct_json(),
+    **snyk_authorization(get_envvar('SNYK_TOKEN'))
+  }
+
+def default_jira_headers():
+  return {
+    **accept_json(),
+    **ct_json(),
+    **jira_authorization(get_envvar('JIRA_USER'), get_envvar('JIRA_TOKEN'))
+  }
+
+@cache
+def user_orgs():
+  return { o['slug']: o for o in fetch_user_orgs() }
+
+def fetch_user_orgs():
+  for o in json.loads(
+    text_request(
+      f'{SNYK_API}/v1/orgs', 
+      headers=default_snyk_headers(),
+    )[2]
+  )['orgs']:
+    yield o
+
+def org_slug_2_id(org_slug):
+  result = user_orgs().get(org_slug, {}).get('id')
+  if not result:
+    error(f'Unable to get the Snyk organization ID from slug "{org_slug}". ' + 
+          f'Please make sure the user for your API token is part of that ' + 
+          f'organization!')
+  return result
+
+@cache
+def open_issues(org_id, proj_id):
+  result = {}
+  for i in fetch_issues(org_id, proj_id):
+    if i['attributes']['status'] != 'resolved':
+      result[i['attributes']['key']] = i
+  return result
+
+def fetch_issues(org_id, proj_id):
+  url = f'{SNYK_API}/rest/orgs/{org_id}/issues?scan_item.type=project&version=2023-11-27~beta&scan_item.id={proj_id}&limit=100'
+
+  while True:
+    j = json.loads(
+      text_request(
+        url, 
+        headers=default_snyk_headers(),
+      )[2]
+    )
+
+    for d in j['data']:
+      yield d
+
+    links = j['links']
+    if links['next'] == links['self']:
+      break
+
+    url = f'{SNYK_API}/{j["links"]["next"]}'
+
+@cache
+def ignored_issues(org_id, proj_id):
+  result = {}
+  for ii in fetch_ignored_issues(org_id, proj_id):
+    k = list(ii.keys())[0]
+    result[k] = ii[k][0]
+    if '*' in result[k]:
+      result[k] = result[k]['*']
+  return result
+
+def fetch_ignored_issues(org_id, proj_id):
+  j = json.loads(
+    text_request(
+      f'{SNYK_API}/v1/org/{org_id}/project/{proj_id}/ignores', 
+      headers=default_snyk_headers(),
+    )[2]
+  )
+  for k, v in j.items():
+    yield { k: v } 
+
+@cache
+def linked_issues(org_id, proj_id):
+  result = {}
+  for li in fetch_linked_issues(org_id, proj_id):
+    k = list(li.keys())[0]
+    result[k] = set(v['jiraIssue']['key'] for v in li[k])
+  return result
+
+def fetch_linked_issues(org_id, proj_id):
+  j = json.loads(
+    text_request(
+      f'{SNYK_API}/v1/org/{org_id}/project/{proj_id}/jira-issues', 
+      headers=default_snyk_headers(),
+    )[2]
+  )
+  for k, v in j.items():
+    yield { k: v }
+
+def issue_link_from_remote_link(ticket_key):
+  j = fetch_ticket_remote_link(ticket_key)
+  for rl in j:
+    if rl.get('application', {}).get('type') == 'com.snyk.snyk':
+      url = rl.get('object', {}).get('url', '')
+      if '#issue-' in url:
+        return url
+  return None  
+
+def fetch_ticket_remote_link(ticket_key):
+  return json.loads(
+    text_request(
+      f'{JIRA_API}/issue/{ticket_key}/remotelink', 
+      headers=default_jira_headers(),
+    )[2]
+  )
+
+@cache
+def tickets(project_key: str):
+  query = f'project = "{project_key}" ORDER BY created DESC'
+  return { t['key']: t for t in fetch_tickets(project_key, query) }
+
+def fetch_tickets(project_key: str, query: str) -> str:
+  per_page = 100
+  total = per_page
+  start_at = 0
+  while start_at < total:
+    j = json.loads(
+      text_request(
+        f'{JIRA_API}/search?jql={quote(query)}&maxResults={per_page}&startAt={start_at}', 
+        headers=default_jira_headers(),
+      )[2]
+    )
+    total = j['total']
+    for i in j['issues']:
+      start_at += 1
+      yield i
+    
+def issue_link_from_desc(desc):
+  if desc:
+    c = desc.get('content', [])
+    for item in c:
+      for ic in item.get('content', []):
+        for m in ic.get('marks', []):
+          if m.get('type') == 'link':
+            link = m.get('attrs', {}).get('href')
+            if '#issue-' in link:
+              return link
+  return None
+
+def extract_issue_link(ticket_json):
+  return issue_link_from_desc(ticket_json.get('fields', {}).get('description', {})) \
+         or \
+         issue_link_from_remote_link(ticket_json['key'])
+
+def parse_issue_link(sl):
+  if sl:
+    m = re.match(
+      '^https://(app\.)?(eu\.|au\.)?snyk\.io/org/([a-zA-Z0-9-_]+)/project/([0-9-a-z]+)#issue-(.+)$',
+      sl
+    )
+    if m:
+      return m.group(3), m.group(4), unquote(m.group(5))
+  return None
+
+def set_ticket_status(ticket_key, status_name):
+  for t in fetch_ticket_transitions(ticket_key):
+    if t['to']['name'] == status_name:
+      do_ticket_transition(ticket_key, t['id'])
+      return
+  error(
+    f'Could not transition JIRA ticket {ticket_key} to status ' +
+    f'"{status_name}", because I did not find a transition ' +
+    f'to it. Please check that the status exists and is ' +
+    f'accessible from all other states in your project\'s workflow!'
+  )
+
+def do_ticket_transition(ticket_key, transition_id):
+  text_request(
+    f'{JIRA_API}/issue/{ticket_key}/transitions', 
+    headers=default_jira_headers(),
+    method='POST',
+    data=json_payload({ 'transition': { 'id': transition_id } }),
+  )
+
+def fetch_ticket_transitions(ticket_key):
+  j = json.loads(
+    text_request(
+      f'{JIRA_API}/issue/{ticket_key}/transitions', 
+      headers=default_jira_headers(),
+    )[2]
+  )
+  for t in j['transitions']:
+    yield t
+
+def replace_ignore(org_id, proj_id, issue_id, reason_type, reason):
+  return json.loads(
+    text_request(
+      f'{SNYK_API}/v1/org/{org_id}/project/{proj_id}/ignore/{issue_id}', 
+      headers=default_snyk_headers(),
+      method='PUT',
+      data=json_payload([{
+        'reasonType': reason_type,
+        'disregardIfFixable': False,
+        'reason': reason,
+      }]),
+    )[2]
+  )
+
+def add_ignore(org_id, proj_id, issue_id, reason_type, reason):
+  return json.loads(
+    text_request(
+      f'{SNYK_API}/v1/org/{org_id}/project/{proj_id}/ignore/{issue_id}', 
+      headers=default_snyk_headers(),
+      method='POST',
+      data=json_payload({
+        'reasonType': reason_type,
+        'disregardIfFixable': False,
+        'reason': reason,
+      }),
+    )[2]
+  )
+
+def delete_ignore(org_id, proj_id, issue_id):
+  return json.loads(
+    text_request(
+      f'{SNYK_API}/v1/org/{org_id}/project/{proj_id}/ignore/{issue_id}', 
+      headers=default_snyk_headers(),
+      method='DELETE',
+    )[2]
+  )
+
+def make_ticket_link(ticket_key):
+  return f'{JIRA_SERVER}/browse/{ticket_key}'
+
+def parse_ticket_key(ticket_key):
+  m = re.match('(.+)-(\d+)', ticket_key)
+  if not m:
+    error(f'{ticket_key} is not a valid JIRA ticket key.')
+  return m.group(1), m.group(2)
+
+def canonical_ticket(jira_proj_key, org_id, proj_id, issue_id):
+  for ticket_key in sorted(
+    filter(
+      lambda x: parse_ticket_key(x)[0] == jira_proj_key,
+      linked_issues(org_id, proj_id).get(issue_id, set()),
+    ),
+    key=lambda x: int(parse_ticket_key(x)[1]),
+  ):
+    if ticket_key in tickets(jira_proj_key):
+      return ticket_key
+  return None
+
+@cache
+def fetch_last_ticket_comment(ticket_key):
+  j = json.loads(
+    text_request(
+      f'{JIRA_API}/issue/{ticket_key}/comment?maxResults=1&orderBy=created&startAt=0&expand=renderedBody', 
+      headers=default_jira_headers(),
+    )[2]
+  )
+
+  total = j['total']
+
+  if total > 1:
+    j = json.loads(
+      text_request(
+        f'{JIRA_API}/issue/{ticket_key}/comment?maxResults=1&orderBy=created&startAt={total - 1}&expand=renderedBody', 
+        headers=default_jira_headers(),
+      )[2]
+    )
+
+  for i in j['comments']:
+    return html2txt(i['renderedBody'])
+
+  return None
+
+def sync(jira_proj_key, report=False):
+  finished_items = []
+  work_items = []
+
+  for k, v in tickets(jira_proj_key).items():
+    ticket_key = k
+    info(f'Processing ticket {ticket_key}...')
+
+    ticket_status = v['fields']['status']['name']
+    issue_link = extract_issue_link(v)
+    parsed_link = parse_issue_link(issue_link)
+
+    if not parsed_link:
+      warn(f'Ticket "{ticket_key}" contains no link to a Snyk ' +
+           f'issue and will hence be ignored!')
+      continue
+
+    org_slug, proj_id, issue_id = parsed_link
+    org_id = org_slug_2_id(org_slug)
+    issue = open_issues(org_id, proj_id).get(issue_id)
+    issue_exists = issue is not None
+
+    if not issue_exists:
+      if ticket_status not in [FIXED, REJECTED, ACCEPTED]:
+        info(f'Linked issue {issue_id} does not exist. ' +
+             f'Setting status of ticket "{ticket_key}" to "{FIXED}"...')
+        set_ticket_status(ticket_key, FIXED)
+      continue
+
+    is_canonical = (ticket_key == canonical_ticket(jira_proj_key, org_id, proj_id, issue_id))
+
+    if not is_canonical: 
+      if ticket_status != REJECTED:
+        warn(f'Ticket "{ticket_key}" is not the canonical ' + 
+             f'ticket for this issue. It will be closed now.')
+        set_ticket_status(ticket_key, REJECTED)
+      continue
+
+    if ticket_status == FIXED:
+      info(f'Ticket "{ticket_key}" is in status {FIXED} but the linked issue ' +
+           f'{issue_id} still exists. Setting status to "{TODO}"...')
+      set_ticket_status(ticket_key, TODO)
+      ticket_status = TODO
+      # the "continue" here is missing deliberately!
+
+    issue_ignored = issue_id in ignored_issues(org_id, proj_id)
+
+    if issue_ignored:
+      if ticket_status == ACCEPTED:
+        # TODO: We could always update the ignore comment here, but it might be expensive
+        pass
+      else:
+        warn(f'Issue {issue_id} is ignored but linked ticket "{ticket_key}" ' +
+             f'is not in status "{ACCEPTED}"! Unignoring...')
+        delete_ignore(org_id, proj_id, issue_id)
+        issue_ignored = False
+    else:
+      if ticket_status == ACCEPTED:
+        info(f'Ticket "{ticket_key}" is in status "{ACCEPTED}". Ignoring linked ' +
+             f'issue {issue_id}...')
+        add_ignore(org_id, proj_id, issue_id, 'wont-fix', fetch_last_ticket_comment(ticket_key))
+        issue_ignored = True
+
+    # reporting
+    if report:
+      attrs = issue['attributes']
+      issue_title = attrs['title']
+      issue_type = attrs['type']
+      issue_score = attrs['risk']['score']['value']
+      ticket_link = make_ticket_link(ticket_key)
+
+      if issue_ignored:
+        ignore_reason = fetch_last_ticket_comment(ticket_key)
+        finished_items.append((
+          html.escape(ticket_key),
+          html.escape(ticket_link, quote=True),
+          html.escape(ignore_reason),
+          html.escape(issue_id),
+          html.escape(issue_link, quote=True),
+          html.escape(issue_title),
+          html.escape(issue_type),
+          int(issue_score),
+        ))
+      else:
+        if ticket_status not in [FIXED, REJECTED, ACCEPTED]:
+          work_items.append((
+            html.escape(ticket_key),
+            html.escape(ticket_link, quote=True),
+            html.escape(issue_id),
+            html.escape(issue_link, quote=True),
+            html.escape(issue_title),
+            html.escape(issue_type),
+            int(issue_score),
+          ))
+  
+  generate_report(work_items, finished_items)
+
+def report_template(work, finished):
+  return f'''
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+  <head>
+    <title>Snyk Ignore Report</title>
+  </head>
+
+  <style>
+    th, td {{
+      border:1px solid black;
+      text-align: center;
+    }}
+  </style>
+
+  <body>
+    <table>
+      <tr>
+        <td>
+          <img src="https://res.cloudinary.com/snyk/image/upload/v1690910069/snyk-mktg-brandui/brand-logos/only-midnight.svg" width="100px"/>
+        </td>
+        <td>
+          <h1>Snyk Ignore Report</h1>
+        </td>
+      </tr>
+    </table>
+
+    <h2>Outstanding Ignores</h2>
+
+    <table style="width:100%">
+      <tr>
+        <th>Score</th>
+        <th>Issue</th>
+        <th>Issue Type</th>
+        <th>Ticket</th>
+      </tr>
+{work}
+    </table>
+
+    <h2>Completed Ignores</h2>
+
+    <table style="width:100%">
+      <tr>
+        <th>Score</th>
+        <th>Issue</th>
+        <th>Issue Type</th>
+        <th>Ignore Reason</th>
+        <th>Ticket</th>
+      </tr>
+{finished}
+    </table>
+  </body>
+</html>
+'''
+
+def make_row(content):
+  return f'<tr>{content}</tr>'
+
+def make_col(content):
+  return f'<td>{content}</td>'
+
+def make_link(target, text):
+  return f'<a href="{target}">{text}</a>'
+
+def generate_report(work_items, finished_items):
+  work = ''
+  finished = ''
+
+  for wi in sorted(work_items, key=lambda el: el[6], reverse=True):
+    (ticket_key, ticket_link,
+    issue_id, issue_link, issue_title,
+    issue_type, issue_score) = wi
+
+    row = f'''
+    <tr>
+      <td>{str(issue_score)}</td>
+      <td><a href="{issue_link}">{issue_title}</a></td>
+      <td>{issue_type}</td>
+      <td><a href="{ticket_link}">{ticket_key}</a></td>
+    </tr>
+    '''
+    work += row 
+
+  for fi in sorted(finished_items, key=lambda el: el[7], reverse=True):
+    (ticket_key, ticket_link, ignore_reason,
+    issue_id, issue_link, issue_title,
+    issue_type, issue_score) = fi
+    
+    row = f'''
+    <tr>
+      <td>{str(issue_score)}</td>
+      <td><a href="{issue_link}">{issue_title}</a></td>
+      <td>{issue_type}</td>
+      <td>{ignore_reason}</td>
+      <td><a href="{ticket_link}">{ticket_key}</a></td>
+    </tr>
+    '''
+    finished += row 
+
+  with open('./report.html', 'w') as f:
+    f.write(report_template(work, finished))
+
+if __name__ == '__main__':
+  sync('IGNORE', report=True)
