@@ -161,7 +161,7 @@ def open_issues(org_id, proj_id):
   return result
 
 def fetch_issues(org_id, proj_id):
-  url = f'{SNYK_API}/rest/orgs/{org_id}/issues?scan_item.type=project&version=2023-11-27~beta&scan_item.id={proj_id}&limit=100'
+  url = f'{SNYK_API}/rest/orgs/{org_id}/issues?scan_item.type=project&version=2024-01-23&scan_item.id={proj_id}&limit=100'
 
   while True:
     j = json.loads(
@@ -175,10 +175,11 @@ def fetch_issues(org_id, proj_id):
       yield d
 
     links = j['links']
-    if links['next'] == links['self']:
+    lnext = links.get('next')
+    if not lnext:
       break
 
-    url = f'{SNYK_API}/{j["links"]["next"]}'
+    url = f'{SNYK_API}/{lnext}'
 
 @cache
 def ignored_issues(org_id, proj_id):
