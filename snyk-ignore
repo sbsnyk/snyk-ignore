@@ -154,14 +154,10 @@ def org_slug_2_id(org_slug):
 
 @cache
 def open_issues(org_id, proj_id):
-  result = {}
-  for i in fetch_issues(org_id, proj_id):
-    if i['attributes']['status'] != 'resolved':
-      result[i['attributes']['key']] = i
-  return result
+  return { i['attributes']['key']: i for i in fetch_open_issues(org_id, proj_id) }
 
-def fetch_issues(org_id, proj_id):
-  url = f'{SNYK_API}/rest/orgs/{org_id}/issues?scan_item.type=project&version=2024-01-23&scan_item.id={proj_id}&limit=100'
+def fetch_open_issues(org_id, proj_id):
+  url = f'{SNYK_API}/rest/orgs/{org_id}/issues?scan_item.type=project&version=2024-01-23&scan_item.id={proj_id}&status=open&limit=100'
 
   while True:
     j = json.loads(
@@ -248,7 +244,7 @@ def fetch_tickets(project_key: str, query: str) -> str:
   while start_at < total:
     j = json.loads(
       text_request(
-        f'{JIRA_API}/search?jql={quote(query)}&maxResults={per_page}&startAt={start_at}', 
+        f'{JIRA_API}/search?jql={quote(query)}&maxResults={per_page}&startAt={start_at}&expand=renderedFields', 
         headers=default_jira_headers(),
       )[2]
     )
@@ -257,23 +253,6 @@ def fetch_tickets(project_key: str, query: str) -> str:
       start_at += 1
       yield i
     
-def issue_link_from_desc(desc):
-  if desc:
-    c = desc.get('content', [])
-    for item in c:
-      for ic in item.get('content', []):
-        for m in ic.get('marks', []):
-          if m.get('type') == 'link':
-            link = m.get('attrs', {}).get('href')
-            if '#issue-' in link:
-              return link
-  return None
-
-def extract_issue_link(ticket_json):
-  return issue_link_from_desc(ticket_json.get('fields', {}).get('description', {})) \
-         or \
-         issue_link_from_remote_link(ticket_json['key'])
-
 def parse_issue_link(sl):
   if sl:
     m = re.match(
@@ -372,32 +351,39 @@ def canonical_ticket(jira_proj_key, org_id, proj_id, issue_id):
       return ticket_key
   return None
 
-@cache
-def fetch_last_ticket_comment(ticket_key):
-  j = json.loads(
-    text_request(
-      f'{JIRA_API}/issue/{ticket_key}/comment?maxResults=1&orderBy=created&startAt=0&expand=renderedBody', 
-      headers=default_jira_headers(),
-    )[2]
-  )
-
-  total = j['total']
-
-  if total > 1:
+def fetch_ticket_comments_rev(ticket_key, per_page=2):
+  total = per_page
+  start_at = 0
+  while start_at < total:
     j = json.loads(
       text_request(
-        f'{JIRA_API}/issue/{ticket_key}/comment?maxResults=1&orderBy=created&startAt={total - 1}&expand=renderedBody', 
+        f'{JIRA_API}/issue/{ticket_key}/comment?maxResults={per_page}&orderBy=-created&expand=renderedBody&startAt={start_at}', 
         headers=default_jira_headers(),
       )[2]
     )
+    total = j['total']
+    for i in j['comments']:
+      start_at += 1
+      yield html2txt(i['renderedBody'])
 
-  for i in j['comments']:
-    return html2txt(i['renderedBody'])
-
+def parse_ticket_ignore_reason(ticket_comment):
+  m = re.match(
+    '^.*\[ignore_reason\](.*)$',
+    ticket_comment,
+    flags=re.DOTALL
+  )
+  if m:
+    return m.group(1)
   return None
 
-def fetch_ignore_comment(ticket_key, default_comment="No reason given"):
-  return fetch_last_ticket_comment(ticket_key) or default_comment
+def ignore_reason_from_ticket(ticket_json):
+  for tc in fetch_ticket_comments_rev(ticket_json['key']):
+    j = parse_ticket_ignore_reason(tc)
+    if j:
+      return j
+
+  j = parse_ticket_ignore_reason(html2txt(ticket_json['renderedFields']['description']))
+  return j if j else None
 
 def check_host(host):
   if not re.match(r'^[a-zA-Z0-9-_]+(\.[a-zA-Z0-9-_]+)*$', host):
@@ -419,34 +405,39 @@ def sync(args):
   global SNYK_API
   SNYK_API = f'https://api.{snyk_host}'
 
-  finished_items = []
+  accepted_ignores = []
   work_items = []
+  problem_items = []
 
-  for k, v in tickets(jira_proj_key).items():
-    ticket_key = k
+  for ticket_key, ticket_json in tickets(jira_proj_key).items():
     info(f'Processing ticket {ticket_key}...')
 
-    ticket_status = v['fields']['status']['name']
-    issue_link = extract_issue_link(v)
+    ticket_status = ticket_json['fields']['status']['name']
+    ticket_link = make_ticket_link(ticket_key)
+    issue_link = issue_link_from_remote_link(ticket_key)
     parsed_link = parse_issue_link(issue_link)
 
     if not parsed_link:
-      warn(f'Ticket "{ticket_key}" contains no link to a Snyk ' +
-           f'issue and will hence be ignored!')
+      warn(f'Ticket "{ticket_key}" contains no link to a Snyk issue.')
+      problem_items.append((ticket_key, ticket_link, 'Missing link to Snyk issue'))
       continue
 
     org_slug, proj_id, issue_id = parsed_link
     org_id = org_slug_2_id(org_slug)
     issue = open_issues(org_id, proj_id).get(issue_id)
-    issue_exists = issue is not None
 
-    if not issue_exists:
+    if not issue:
+      # issue does not exist (anymore?)
       if ticket_status not in [FIXED, REJECTED, ACCEPTED]:
         info(f'Linked issue {issue_id} does not exist. ' +
              f'Setting status of ticket "{ticket_key}" to "{FIXED}"...')
         set_ticket_status(ticket_key, FIXED)
       continue
 
+    attrs = issue['attributes']
+    issue_title = attrs['title']
+    issue_type = attrs['type']
+    issue_score = attrs['risk']['score']['value']
     is_canonical = (ticket_key == canonical_ticket(jira_proj_key, org_id, proj_id, issue_id))
 
     if not is_canonical: 
@@ -464,34 +455,36 @@ def sync(args):
       # the "continue" here is missing deliberately!
 
     issue_ignored = issue_id in ignored_issues(org_id, proj_id)
+    ignore_reason = None
 
-    if issue_ignored:
-      if ticket_status == ACCEPTED:
-        # TODO: We could always update the ignore comment here, but it might be expensive
-        pass
-      else:
-        warn(f'Issue {issue_id} is ignored but linked ticket "{ticket_key}" ' +
-             f'is not in status "{ACCEPTED}"! Unignoring...')
-        delete_ignore(org_id, proj_id, issue_id)
-        issue_ignored = False
-    else:
-      if ticket_status == ACCEPTED:
+    if ticket_status == ACCEPTED:
+      ignore_reason = ignore_reason_from_ticket(ticket_json)
+      if not ignore_reason:
+        warn(f'No ignore comment found for ticket "{ticket_key}".')
+        problem_items.append((ticket_key, ticket_link, 'No ignore reason given.'))
+        continue
+
+      if not issue_ignored:
         info(f'Ticket "{ticket_key}" is in status "{ACCEPTED}". Ignoring linked ' +
              f'issue {issue_id}...')
-        add_ignore(org_id, proj_id, issue_id, 'wont-fix', fetch_ignore_comment(ticket_key))
+        add_ignore(org_id, proj_id, issue_id, 'wont-fix', ignore_reason)
         issue_ignored = True
+
+    elif issue_ignored:
+      warn(f'Issue {issue_id} is ignored but linked ticket "{ticket_key}" ' +
+           f'is not in status "{ACCEPTED}"! Unignoring...')
+      delete_ignore(org_id, proj_id, issue_id)
+      issue_ignored = False
+
 
     # reporting
     if report_path:
-      attrs = issue['attributes']
-      issue_title = attrs['title']
-      issue_type = attrs['type']
-      issue_score = attrs['risk']['score']['value']
-      ticket_link = make_ticket_link(ticket_key)
-
       if issue_ignored:
-        ignore_reason = fetch_ignore_comment(ticket_key)
-        finished_items.append((
+
+        if not ignore_reason:
+          ignore_reason = ignore_reason_from_ticket(ticket_json)
+
+        accepted_ignores.append((
           html.escape(ticket_key),
           html.escape(ticket_link, quote=True),
           html.escape(ignore_reason),
@@ -514,9 +507,9 @@ def sync(args):
           ))
   
   if report_path:
-    generate_report(report_path, work_items, finished_items)
+    generate_report(report_path, work_items, accepted_ignores, problem_items)
 
-def report_template(work, finished):
+def report_template(work, finished, problems):
   return f'''
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
    "http://www.w3.org/TR/html4/strict.dtd">
@@ -568,6 +561,16 @@ def report_template(work, finished):
       </tr>
 {finished}
     </table>
+
+    <h2>Problems</h2>
+
+    <table style="width:100%">
+      <tr>
+        <th>Ticket</th>
+        <th>Description</th>
+      </tr>
+{problems}
+    </table>
   </body>
 </html>
 '''
@@ -581,16 +584,17 @@ def make_col(content):
 def make_link(target, text):
   return f'<a href="{target}">{text}</a>'
 
-def generate_report(report_path, work_items, finished_items):
+def generate_report(report_path, work_items, accepted_ignores, problem_items):
   work = ''
   finished = ''
+  problems = ''
 
   for wi in sorted(work_items, key=lambda el: el[6], reverse=True):
     (ticket_key, ticket_link,
     issue_id, issue_link, issue_title,
     issue_type, issue_score) = wi
 
-    row = f'''
+    work += f'''
     <tr>
       <td>{str(issue_score)}</td>
       <td><a href="{issue_link}">{issue_title}</a></td>
@@ -598,14 +602,13 @@ def generate_report(report_path, work_items, finished_items):
       <td><a href="{ticket_link}">{ticket_key}</a></td>
     </tr>
     '''
-    work += row 
 
-  for fi in sorted(finished_items, key=lambda el: el[7], reverse=True):
+  for ai in sorted(accepted_ignores, key=lambda el: el[7], reverse=True):
     (ticket_key, ticket_link, ignore_reason,
     issue_id, issue_link, issue_title,
-    issue_type, issue_score) = fi
+    issue_type, issue_score) = ai
     
-    row = f'''
+    finished += f'''
     <tr>
       <td>{str(issue_score)}</td>
       <td><a href="{issue_link}">{issue_title}</a></td>
@@ -614,10 +617,19 @@ def generate_report(report_path, work_items, finished_items):
       <td><a href="{ticket_link}">{ticket_key}</a></td>
     </tr>
     '''
-    finished += row 
+
+  for p in problem_items:
+    (ticket_key, ticket_link, description) = p
+    
+    problems += f'''
+    <tr>
+      <td><a href="{ticket_link}">{ticket_key}</a></td>
+      <td>{description}</td>
+    </tr>
+    '''
 
   with open(report_path, 'w') as f:
-    f.write(report_template(work, finished))
+    f.write(report_template(work, finished, problems))
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(
