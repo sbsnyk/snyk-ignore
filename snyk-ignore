@@ -544,7 +544,7 @@ def report_template(work, finished):
       </tr>
     </table>
 
-    <h2>Outstanding Ignores</h2>
+    <h2>Ignores to be reviewed</h2>
 
     <table style="width:100%">
       <tr>
@@ -556,7 +556,7 @@ def report_template(work, finished):
 {work}
     </table>
 
-    <h2>Completed Ignores</h2>
+    <h2>Accepted Ignores</h2>
 
     <table style="width:100%">
       <tr>
